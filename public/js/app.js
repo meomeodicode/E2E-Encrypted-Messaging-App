@@ -1,3 +1,7 @@
+/**
+ * E2E Encrypted Messaging Application
+ * Main application class handling UI, authentication, and messaging
+ */
 class MessagingApp {
     constructor() {
         this.socket = null;
@@ -8,78 +12,115 @@ class MessagingApp {
         this.onlineUsers = new Set();
         this.typingUsers = new Set();
         this.messages = new Map();
-        
         this.init();
     }
 
     async init() {
-        console.log('🚀 App initialization started');
-        
-        // Add timeout fallback to prevent infinite loading
-        setTimeout(() => {
-            const loadingOverlay = document.getElementById('loadingOverlay');
-            if (loadingOverlay && window.getComputedStyle(loadingOverlay).display !== 'none') {
-                console.warn('⚠️ Loading timeout - forcing auth modal');
-                console.log('🔧 Manually hiding loading overlay and showing auth modal');
-                
-                // Force hide loading overlay
-                loadingOverlay.style.display = 'none';
-                
-                // Force show auth modal
-                this.showAuthModal();
-            }
-        }, 5000); // Reduced to 5 second timeout for faster debugging
+        // setTimeout(() => {
+        //     const loadingOverlay = document.getElementById('loadingOverlay');
+        //     if (loadingOverlay && window.getComputedStyle(loadingOverlay).display !== 'none') {
+        //         loadingOverlay.style.display = 'none';
+        //         this.showAuthModal();
+        //     }
+        // }, 5000);
         
         try {
             await this.setupEventListeners();
-            console.log('✅ Event listeners setup complete');
-            
             await this.checkAuthToken();
-            console.log('✅ Auth check complete');
         } catch (error) {
-            console.error('❌ App initialization failed:', error);
+            console.error('App initialization failed:', error);
             this.showAuthModal();
         }
     }
 
-    async checkAuthToken() {
-        console.log('🔍 Checking authentication token...');
+    async init() {
+        // setTimeout(() => {
+        //     const loadingOverlay = document.getElementById('loadingOverlay');
+        //     if (loadingOverlay && window.getComputedStyle(loadingOverlay).display !== 'none') {
+        //         loadingOverlay.style.display = 'none';
+        //         this.showAuthModal();
+        //     }
+        // }, 5000);
         
+        try {
+            await this.setupEventListeners();
+            await this.checkAuthToken();
+        } catch (error) {
+            console.error('App initialization failed:', error);
+            this.showAuthModal();
+        }
+    }
+
+    /**
+     * Check for existing authentication token and initialize app
+     */
+    async checkAuthToken() {
         const token = localStorage.getItem('token');
         const user = localStorage.getItem('user');
-        
-        console.log('Token exists:', !!token);
-        console.log('User exists:', !!user);
 
         if (token && user) {
-            console.log('✅ Found existing auth, initializing app...');
             try {
                 this.currentUser = JSON.parse(user);
+                await this.crypto.initializeForUser(this.currentUser.id);
                 await this.initializeApp();
             } catch (error) {
-                console.error('❌ App initialization failed:', error);
-                localStorage.removeItem('token');
-                localStorage.removeItem('user');
+                console.error('Authentication initialization failed:', error);
+                this.clearAuthData();
                 this.showAuthModal();
             }
         } else {
-            console.log('❌ No existing auth, showing login');
             this.showAuthModal();
         }
     }
 
+    /**
+     * Clear stored authentication data (but preserve encryption keys)
+     */
+    clearAuthData() {
+        // Clear authentication data only - KEEP encryption keys
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        
+        // Reset crypto instance but don't clear keys from localStorage
+        this.crypto = new E2ECrypto();
+    }
+
+    /**
+     * Emergency cleanup - clears ALL crypto data (for debugging)
+     */
+    emergencyCleanup() {
+        // Clear all localStorage
+        const keys = Object.keys(localStorage);
+        keys.forEach(key => {
+            if (key.startsWith('privateKey_') || key.startsWith('publicKey_')) {
+                localStorage.removeItem(key);
+            }
+        });
+        
+        // Clear auth data
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        
+        // Reset crypto
+        this.crypto = new E2ECrypto();
+        
+        // Reload page
+        window.location.reload();
+    }
+
+    /**
+     * Show authentication modal
+     */
     showAuthModal() {
-        console.log('🔄 Showing auth modal...');
         document.getElementById('loadingOverlay').style.display = 'none';
         document.getElementById('authModal').style.display = 'flex';
         document.getElementById('app').style.display = 'none';
-        
-        console.log('✅ Auth modal displayed');
     }
 
+    /**
+     * Hide authentication modal and show main app
+     */
     hideAuthModal() {
-        console.log('🔄 Hiding auth modal...');
-        
         document.getElementById('loadingOverlay').style.display = 'none';
         document.getElementById('authModal').style.display = 'none';
         document.getElementById('app').style.display = 'block';
@@ -129,6 +170,9 @@ class MessagingApp {
         document.getElementById('authError').textContent = '';
     }
 
+    /**
+     * Handle user authentication (login/register)
+     */
     async handleAuth(e) {
         e.preventDefault();
         
@@ -139,36 +183,17 @@ class MessagingApp {
 
         errorDiv.textContent = '';
 
+        if (!username || !password) {
+            errorDiv.textContent = 'Please enter username and password';
+            return;
+        }
+
         try {
-            let body = { username, password };
-            let publicKeyBase64 = '';
-
-            if (!isLogin) {
-                console.log('📝 Registration: generating encryption keys...');
-                document.getElementById('loadingOverlay').style.display = 'flex';
-                
-                try {
-                    await this.crypto.generateKeyPair();
-                    publicKeyBase64 = await this.crypto.exportPublicKey();
-                    
-                    body.publicKey = publicKeyBase64;
-                } catch (error) {
-                    console.error('Key generation failed:', error);
-                    document.getElementById('loadingOverlay').style.display = 'none';
-                    errorDiv.textContent = 'Failed to generate encryption keys. Please try again.';
-                    return;
-                }
-                
-                document.getElementById('loadingOverlay').style.display = 'none';
-            }
-
-            console.log('🌐 Sending authentication request...');
-            const response = await fetch(`/api/${isLogin ? 'login' : 'register'}`, {
+            const url = `/api/${isLogin ? 'login' : 'register'}`;
+            const response = await fetch(url, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(body)
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
             });
 
             const data = await response.json();
@@ -178,29 +203,61 @@ class MessagingApp {
                 localStorage.setItem('user', JSON.stringify(data.user));
                 this.currentUser = data.user;
 
-                if (isLogin) {
-                    document.getElementById('loadingOverlay').style.display = 'flex';
-                    await this.crypto.generateKeyPair();
-                    document.getElementById('loadingOverlay').style.display = 'none';
+                // Initialize encryption for the authenticated user
+                document.getElementById('loadingOverlay').style.display = 'flex';
+                const loadingText = document.querySelector('#loadingOverlay p');
+                if (loadingText) {
+                    loadingText.textContent = 'Setting up encryption...';
                 }
-
-                await this.initializeApp();
+                
+                try {
+                    await this.crypto.initializeForUser(data.user.id);
+                    const publicKey = await this.crypto.exportPublicKey();
+                    await this.updateUserPublicKey(publicKey);
+                    await this.initializeApp();
+                } catch (cryptoError) {
+                    console.error('Encryption setup failed:', cryptoError);
+                    document.getElementById('loadingOverlay').style.display = 'none';
+                    errorDiv.textContent = 'Failed to initialize encryption. Please try again.';
+                    this.clearAuthData();
+                }
             } else {
                 errorDiv.textContent = data.error || 'Authentication failed';
             }
         } catch (error) {
-            console.error('Auth error:', error);
+            console.error('Authentication error:', error);
             errorDiv.textContent = 'Connection error. Please try again.';
             document.getElementById('loadingOverlay').style.display = 'none';
+        }
+    }
+
+    async updateUserPublicKey(publicKey) {
+        try {
+            const token = localStorage.getItem('token');
+            const response = await fetch('/api/user/publickey', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                },
+                body: JSON.stringify({ publicKey })
+            });
+            
+            if (response.ok) {
+                console.log('✅ Public key updated on server');
+            } else {
+                console.error('Failed to update public key on server');
+            }
+        } catch (error) {
+            console.error('Error updating public key:', error);
+            // Don't throw - this is not critical for functionality
         }
     }
 
     async initializeApp() {
         this.hideAuthModal();
         document.getElementById('currentUser').textContent = this.currentUser.username;
-
         this.initializeSocket();
-        
         await this.loadContacts();
     }
 
@@ -250,6 +307,29 @@ class MessagingApp {
         this.socket.on('message_error', (data) => {
             console.error('Message error:', data.error);
         });
+    }
+
+    async updateUserPublicKey(publicKey) {
+        try {
+            const token = localStorage.getItem('token');
+            const response = await fetch('/api/user/publickey', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-auth-token': token
+                },
+                body: JSON.stringify({ publicKey })
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to update public key on server');
+            }
+            
+            console.log('✅ Public key updated on server');
+        } catch (error) {
+            console.error('Failed to update public key:', error);
+            // Don't throw - this is not critical for functionality
+        }
     }
 
     async loadContacts() {
@@ -341,46 +421,77 @@ class MessagingApp {
         await this.loadMessageHistory(contact.id);
     }
 
-    async loadMessageHistory(contactId) {
+    /**
+     * Load and decrypt message history for a contact
+     */
+        async loadMessageHistory(contactId) {
         try {
             const token = localStorage.getItem('token');
             const response = await fetch(`/api/messages/${contactId}`, {
-                headers: {
-                    'x-auth-token': token
-                }
+                headers: { 'x-auth-token': token }
             });
 
-            if (response.ok) {
-                const messages = await response.json();
+            if (!response.ok) {
+                throw new Error('Failed to load messages');
+            }
+
+            const messages = await response.json();
+            const decryptedMessages = [];
+            
+            const existingMessages = this.messages.get(contactId) || [];
+            const localMessages = existingMessages.filter(msg => msg.isLocal);
+            
+            for (const message of messages) {
+                const isSentByMe = message.sender_id === this.currentUser.id;
+                const isForMe = message.receiver_id === this.currentUser.id; 
                 
-                const decryptedMessages = [];
-                for (const message of messages) {
+                if (isSentByMe) {
+                    decryptedMessages.push({
+                        ...message,
+                        content: '[Encrypted message you sent]',
+                        isSent: true,
+                        isEncrypted: true
+                    });
+                } else if (isForMe) {
                     try {
                         const decryptedContent = await this.crypto.decryptMessage(message.encrypted_content);
                         decryptedMessages.push({
                             ...message,
                             content: decryptedContent,
-                            isSent: message.sender_id === this.currentUser.id
+                            isSent: false
                         });
                     } catch (error) {
-                        console.error('Failed to decrypt message:', error);
                         decryptedMessages.push({
                             ...message,
                             content: '[Failed to decrypt message]',
-                            isSent: message.sender_id === this.currentUser.id,
+                            isSent: false,
                             isError: true
                         });
                     }
+                } else {
+                    // Message is neither sent by me nor for me - shouldn't happen in a proper conversation
+                    decryptedMessages.push({
+                        ...message,
+                        content: '[Message not for you]',
+                        isSent: false,
+                        isError: true
+                    });
                 }
-
-                this.messages.set(contactId, decryptedMessages);
-                this.renderMessages();
             }
+
+            const allMessages = [...decryptedMessages, ...localMessages];
+            allMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+            this.messages.set(contactId, allMessages);
+            this.renderMessages();
         } catch (error) {
             console.error('Error loading message history:', error);
         }
-    }
+        }
 
+    /**
+     * Render all messages for the selected contact
+     */
     renderMessages() {
         const messagesContainer = document.getElementById('messagesContainer');
         messagesContainer.innerHTML = '';
@@ -422,6 +533,9 @@ class MessagingApp {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
 
+    /**
+     * Send an encrypted message to the selected contact
+     */
     async sendMessage() {
         const messageInput = document.getElementById('messageInput');
         const content = messageInput.value.trim();
@@ -433,9 +547,7 @@ class MessagingApp {
         try {
             const token = localStorage.getItem('token');
             const response = await fetch(`/api/users/${this.selectedContact.username}/publickey`, {
-                headers: {
-                    'x-auth-token': token
-                }
+                headers: { 'x-auth-token': token }
             });
 
             if (!response.ok) {
@@ -443,7 +555,6 @@ class MessagingApp {
             }
 
             const { publicKey } = await response.json();
-
             const encryptedContent = await this.crypto.encryptMessage(content, publicKey);
             const messageId = this.crypto.generateMessageId();
 
@@ -453,14 +564,16 @@ class MessagingApp {
                 messageId: messageId
             });
 
+            // Store message locally until server confirmation
             const messages = this.messages.get(this.selectedContact.id) || [];
             messages.push({
                 id: messageId,
                 sender_id: this.currentUser.id,
                 receiver_id: this.selectedContact.id,
-                content: content,
+                content: content, 
                 timestamp: new Date().toISOString(),
-                isSent: true
+                isSent: true,
+                isLocal: true 
             });
             this.messages.set(this.selectedContact.id, messages);
 
@@ -473,6 +586,9 @@ class MessagingApp {
         }
     }
 
+    /**
+     * Handle incoming encrypted messages from other users
+     */
     async handleNewMessage(data) {
         try {
             const decryptedContent = await this.crypto.decryptMessage(data.encryptedContent);
@@ -489,6 +605,7 @@ class MessagingApp {
             });
             this.messages.set(data.senderId, messages);
 
+            // Update UI if this message is from the currently selected contact
             if (this.selectedContact && this.selectedContact.id === data.senderId) {
                 this.renderMessages();
             }
@@ -498,6 +615,9 @@ class MessagingApp {
         }
     }
 
+    /**
+     * Handle typing indicators - notify when user is typing
+     */
     handleTyping() {
         if (this.selectedContact && this.typingTimeout) {
             clearTimeout(this.typingTimeout);
@@ -512,6 +632,9 @@ class MessagingApp {
         }
     }
 
+    /**
+     * Update the typing indicator display
+     */
     updateTypingIndicator() {
         const typingIndicator = document.getElementById('typingIndicator');
         
@@ -522,14 +645,21 @@ class MessagingApp {
         }
     }
 
+    /**
+     * Log out the user and clean up session data (but preserve encryption keys)
+     */
     logout() {
+        // Clear authentication data only - KEEP encryption keys
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         
+        // Disconnect socket
         if (this.socket) {
             this.socket.disconnect();
+            this.socket = null;
         }
 
+        // Reset application state
         this.currentUser = null;
         this.selectedContact = null;
         this.contacts = [];
@@ -537,15 +667,32 @@ class MessagingApp {
         this.typingUsers.clear();
         this.messages.clear();
 
+        // Clear any typing timeout
+        if (this.typingTimeout) {
+            clearTimeout(this.typingTimeout);
+            this.typingTimeout = null;
+        }
+
+        // Reset UI
         document.getElementById('messageInput').disabled = true;
         document.getElementById('sendBtn').disabled = true;
         document.getElementById('noChatSelected').style.display = 'flex';
         document.getElementById('chatContainer').style.display = 'none';
+        
+        // Clear form inputs
+        document.getElementById('username').value = '';
+        document.getElementById('password').value = '';
+        document.getElementById('authError').textContent = '';
 
         this.showAuthModal();
     }
+
+    
 }
+
 
 document.addEventListener('DOMContentLoaded', () => {
     new MessagingApp();
 });
+
+

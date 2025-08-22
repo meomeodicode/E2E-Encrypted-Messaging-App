@@ -61,12 +61,9 @@ function validateOrGenerateJWT() {
         
         fs.writeFileSync('.env', envContent);
         console.log('✅ Generated and saved JWT_SECRET to .env');
-        console.log(`🔑 Your JWT_SECRET: ${newSecret.substring(0, 16)}...`);
     } else if (process.env.JWT_SECRET.length < 32) {
         console.error('❌ JWT_SECRET is too short (minimum 32 characters)');
         process.exit(1);
-    } else {
-        console.log('✅ JWT_SECRET validated successfully');
     }
     
     return process.env.JWT_SECRET;
@@ -123,6 +120,9 @@ function initializeDatabase() {
     });
 }
 
+/**
+ * Middleware to verify JWT token
+ */
 const verifyToken = (req, res, next) => {
     const token = req.header('x-auth-token');
     if (!token) {
@@ -138,6 +138,9 @@ const verifyToken = (req, res, next) => {
     }
 };
 
+/**
+ * User registration endpoint
+ */
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password, publicKey } = req.body;
@@ -172,6 +175,9 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+/**
+ * User login endpoint
+ */
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -208,6 +214,9 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+/**
+ * Get user's public key endpoint
+ */
 app.get('/api/users/:username/publickey', verifyToken, (req, res) => {
     const { username } = req.params;
 
@@ -223,6 +232,9 @@ app.get('/api/users/:username/publickey', verifyToken, (req, res) => {
     });
 });
 
+/**
+ * Get all users (for contact list)
+ */
 app.get('/api/users', verifyToken, (req, res) => {
     db.all('SELECT id, username FROM users WHERE id != ?', [req.user.id], (err, users) => {
         if (err) {
@@ -232,6 +244,67 @@ app.get('/api/users', verifyToken, (req, res) => {
     });
 });
 
+app.get('/api/debug/messages', verifyToken, (req, res) => {
+    db.all(`
+        SELECT id, sender_id, receiver_id, 
+               LENGTH(encrypted_content) as content_length,
+               encrypted_content,
+               datetime(timestamp, 'localtime') as timestamp
+        FROM messages 
+        WHERE sender_id = ? OR receiver_id = ?
+        ORDER BY timestamp DESC 
+        LIMIT 5
+    `, [req.user.id, req.user.id], (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: err.message });
+        } else {
+            const messagesWithStructure = rows.map(row => {
+                // Don't try to parse yet - just show raw content
+                return {
+                    id: row.id,
+                    sender_id: row.sender_id,
+                    receiver_id: row.receiver_id,
+                    content_length: row.content_length,
+                    timestamp: row.timestamp,
+                    rawContent: row.encrypted_content,  // Show the full raw content
+                    contentPreview: row.encrypted_content.substring(0, 200) + '...', // First 200 chars
+                    startsWithBrace: row.encrypted_content.trim().startsWith('{'),
+                    endsWithBrace: row.encrypted_content.trim().endsWith('}')
+                };
+            });
+            res.json(messagesWithStructure);
+        }
+    });
+});
+/**
+ * Update user's public key
+ */
+// Update user's public key
+app.put('/api/user/publickey', verifyToken, (req, res) => {
+    const { publicKey } = req.body;
+    const userId = req.user.id;
+    
+    if (!publicKey) {
+        return res.status(400).json({ error: 'Public key is required' });
+    }
+    
+    db.run('UPDATE users SET public_key = ? WHERE id = ?', [publicKey, userId], function(err) {
+        if (err) {
+            console.error('Failed to update public key:', err);
+            return res.status(500).json({ error: 'Failed to update public key' });
+        }
+        
+        if (this.changes === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        res.json({ success: true });
+    });
+});
+
+/**
+ * Get message history between current user and another user
+ */
 app.get('/api/messages/:userId', verifyToken, (req, res) => {
     const { userId } = req.params;
     const currentUserId = req.user.id;
@@ -253,8 +326,10 @@ app.get('/api/messages/:userId', verifyToken, (req, res) => {
 
 const connectedUsers = new Map();
 
+/**
+ * Socket.IO connection handling
+ */
 io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
 
     socket.on('authenticate', (token) => {
         try {
@@ -327,7 +402,6 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.id);
         if (socket.userId) {
             connectedUsers.delete(socket.userId);
             socket.broadcast.emit('user_offline', { 

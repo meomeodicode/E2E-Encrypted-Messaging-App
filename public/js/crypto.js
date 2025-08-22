@@ -1,20 +1,58 @@
+/**
+ * E2E Encryption Handler
+ * Manages RSA-OAEP + AES-GCM hybrid encryption for secure messaging
+ */
 class E2ECrypto {
     constructor() {
         this.keyPair = null;
-        this.publicKeyCache = new Map(); 
+        this.publicKeyCache = new Map();
     }
 
-    async generateKeyPair() {
-        console.log('🔑 Starting RSA key generation...');
-        console.log('🔐 Crypto.subtle available:', !!window.crypto?.subtle);
+    /**
+     * Initialize encryption keys for a specific user
+     * @param {string} userId - User ID for key storage
+     * @returns {Promise<Object|null>} Key pair or null
+     */
+    async initializeForUser(userId) {
+        if (!userId) {
+            throw new Error('User ID is required for key initialization');
+        }
+
+        // Try to load existing keys first
+        try {
+            await this.loadKeyPair(userId);
+            if (this.keyPair) {
+                console.log('✅ Loaded existing keys for user:', userId);
+                return this.keyPair;
+            }
+        } catch (error) {
+            console.warn('Failed to load existing keys:', error);
+            this.clearKeys(userId);
+        }
         
+        console.log('🔑 Generating new encryption keys for user:', userId);
+        this.showLoadingOverlay('Generating encryption keys...');
+        try {
+            await this.generateKeyPair(userId);
+            console.log('✅ Generated new keys for user:', userId);
+        } finally {
+            this.hideLoadingOverlay();
+        }
+        
+        return this.keyPair;
+    }
+
+    /**
+     * Generate new RSA key pair for encryption
+     * @param {string} userId - User ID for key storage
+     * @returns {Promise<Object>} Generated key pair
+     */
+    async generateKeyPair(userId) {
         if (!window.crypto?.subtle) {
             throw new Error('Web Crypto API not available. Requires HTTPS or localhost.');
         }
         
         try {
-            console.log('⏳ Generating 2048-bit RSA key pair...');
-            
             this.keyPair = await window.crypto.subtle.generateKey(
                 {
                     name: "RSA-OAEP",
@@ -25,39 +63,152 @@ class E2ECrypto {
                 true,
                 ["encrypt", "decrypt"]
             );
-
-            console.log('✅ Key pair generated successfully!');
+            
+            if (userId) {
+                await this.saveKeyPair(userId);
+            }
+            
             return this.keyPair;
         } catch (error) {
-            console.error('❌ Key generation failed:', error);
-            throw error;
+            throw new Error(`Key generation failed: ${error.message}`);
         }
     }
 
-    async exportPublicKey() {
-        if (!this.keyPair) {
-            throw new Error('Key pair not generated');
+    /**
+     * Save key pair to localStorage with user-specific naming
+     * @param {string} userId - User ID for key storage
+     * @returns {Promise<boolean>} Success status
+     */
+    async saveKeyPair(userId) {
+        if (!this.keyPair || !userId) {
+            return false;
         }
-
+        
         try {
-            const exported = await window.crypto.subtle.exportKey(
-                "spki",
+            const exportedPrivate = await window.crypto.subtle.exportKey(
+                "pkcs8", 
+                this.keyPair.privateKey
+            );
+            
+            const exportedPublic = await window.crypto.subtle.exportKey(
+                "spki", 
                 this.keyPair.publicKey
             );
-
-            return this.arrayBufferToBase64(exported);
+            
+            localStorage.setItem(`privateKey_${userId}`, this.arrayBufferToBase64(exportedPrivate));
+            localStorage.setItem(`publicKey_${userId}`, this.arrayBufferToBase64(exportedPublic));
+            
+            return true;
         } catch (error) {
-            console.error('Error exporting public key:', error);
-            throw error;
+            throw new Error(`Failed to save keys: ${error.message}`);
         }
     }
 
-    async importPublicKey(publicKeyBase64) {
+    /**
+     * Load key pair from localStorage
+     * @param {string} userId - User ID for key retrieval
+     * @returns {Promise<Object|null>} Key pair or null if not found
+     */
+    async loadKeyPair(userId) {
+        if (!userId) {
+            return null;
+        }
+        
         try {
-            const keyBuffer = this.base64ToArrayBuffer(publicKeyBase64);
+            const privateKeyBase64 = localStorage.getItem(`privateKey_${userId}`);
+            const publicKeyBase64 = localStorage.getItem(`publicKey_${userId}`);
+            
+            if (!privateKeyBase64 || !publicKeyBase64) {
+                return null;
+            }
+            
+            const privateKey = await window.crypto.subtle.importKey(
+                "pkcs8",
+                this.base64ToArrayBuffer(privateKeyBase64),
+                {
+                    name: "RSA-OAEP",
+                    hash: "SHA-256"
+                },
+                true,
+                ["decrypt"]
+            );
+            
             const publicKey = await window.crypto.subtle.importKey(
                 "spki",
-                keyBuffer,
+                this.base64ToArrayBuffer(publicKeyBase64),
+                {
+                    name: "RSA-OAEP",
+                    hash: "SHA-256"
+                },
+                true,
+                ["encrypt"]
+            );
+            
+            this.keyPair = { publicKey, privateKey };
+            return this.keyPair;
+        } catch (error) {
+            if (userId) {
+                localStorage.removeItem(`privateKey_${userId}`);
+                localStorage.removeItem(`publicKey_${userId}`);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Clear stored keys and reset crypto state
+     * @param {string} userId - Optional user ID to clear specific keys
+     */
+    clearKeys(userId) {
+        if (userId) {
+            localStorage.removeItem(`privateKey_${userId}`);
+            localStorage.removeItem(`publicKey_${userId}`);
+        } else {
+            // Clear all crypto-related data
+            const keys = Object.keys(localStorage);
+            keys.forEach(key => {
+                if (key.startsWith('privateKey_') || key.startsWith('publicKey_')) {
+                    localStorage.removeItem(key);
+                }
+            });
+        }
+        
+        this.keyPair = null;
+        this.publicKeyCache.clear();
+    }
+
+    /**
+     * Export public key as base64 string
+     * @returns {Promise<string>} Base64 encoded public key
+     */
+    async exportPublicKey() {
+        if (!this.keyPair?.publicKey) {
+            throw new Error('No key pair available for export');
+        }
+
+        try {
+            const exported = await window.crypto.subtle.exportKey("spki", this.keyPair.publicKey);
+            return this.arrayBufferToBase64(exported);
+        } catch (error) {
+            throw new Error(`Failed to export public key: ${error.message}`);
+        }
+    }
+
+    /**
+     * Import public key from base64 string
+     * @param {string} publicKeyBase64 - Base64 encoded public key
+     * @returns {Promise<CryptoKey>} Imported public key
+     */
+    async importPublicKey(publicKeyBase64) {
+        // Check cache first
+        if (this.publicKeyCache.has(publicKeyBase64)) {
+            return this.publicKeyCache.get(publicKeyBase64);
+        }
+
+        try {
+            const publicKey = await window.crypto.subtle.importKey(
+                "spki",
+                this.base64ToArrayBuffer(publicKeyBase64),
                 {
                     name: "RSA-OAEP",
                     hash: "SHA-256"
@@ -66,13 +217,19 @@ class E2ECrypto {
                 ["encrypt"]
             );
 
+            this.publicKeyCache.set(publicKeyBase64, publicKey);
             return publicKey;
         } catch (error) {
-            console.error('Error importing public key:', error);
-            throw error;
+            throw new Error(`Failed to import public key: ${error.message}`);
         }
     }
 
+    /**
+     * Encrypt message using hybrid RSA-OAEP + AES-GCM encryption
+     * @param {string} message - Plain text message
+     * @param {string} recipientPublicKeyBase64 - Recipient's public key
+     * @returns {Promise<string>} Encrypted message as JSON string
+     */
     async encryptMessage(message, recipientPublicKeyBase64) {
         try {
             let publicKey = this.publicKeyCache.get(recipientPublicKeyBase64);
@@ -113,7 +270,7 @@ class E2ECrypto {
 
             const result = {
                 encryptedAESKey: this.arrayBufferToBase64(encryptedAESKey),
-                encryptedMessage: this.arrayBufferToBase64(encryptedMessage),
+                encryptedContent: this.arrayBufferToBase64(encryptedMessage),
                 iv: this.arrayBufferToBase64(iv)
             };
 
@@ -124,59 +281,79 @@ class E2ECrypto {
         }
     }
 
-    async decryptMessage(encryptedData) {
-        try {
-            if (!this.keyPair) {
-                throw new Error('Key pair not available');
-            }
+    /**
+     * Decrypt message using hybrid RSA-OAEP + AES-GCM decryption
+     * @param {string} encryptedData - Encrypted message as JSON string
+     * @returns {Promise<string>} Decrypted plain text message
+     */
+   async decryptMessage(encryptedData) {
 
-            const data = JSON.parse(encryptedData);
-            
-            const encryptedAESKeyBuffer = this.base64ToArrayBuffer(data.encryptedAESKey);
-            const decryptedAESKeyBuffer = await window.crypto.subtle.decrypt(
-                {
-                    name: "RSA-OAEP"
-                },
-                this.keyPair.privateKey,
-                encryptedAESKeyBuffer
-            );
+    if (!this.keyPair || !this.keyPair.privateKey) {
+        throw new Error('Key pair not available');
+    }
+    
+    try {
+        const data = JSON.parse(encryptedData);
+        const encryptedAESKey = this.base64ToArrayBuffer(data.encryptedAESKey);
+        
+        const aesKeyBuffer = await window.crypto.subtle.decrypt(
+            { name: "RSA-OAEP" },
+            this.keyPair.privateKey,
+            encryptedAESKey
+        );
+        
+        const aesKey = await window.crypto.subtle.importKey(
+            "raw",
+            aesKeyBuffer,
+            { name: "AES-GCM" },
+            false,
+            ["decrypt"]
+        );
+        
+        const encryptedContent = this.base64ToArrayBuffer(data.encryptedContent);
+        const iv = this.base64ToArrayBuffer(data.iv);
+        
+        const decryptedBuffer = await window.crypto.subtle.decrypt(
+            {
+                name: "AES-GCM",
+                iv: iv
+            },
+            aesKey,
+            encryptedContent
+        );
+        
+        return new TextDecoder().decode(decryptedBuffer);
+    } catch (error) {
+        throw error;
+    }
+}
 
-            const aesKey = await window.crypto.subtle.importKey(
-                "raw",
-                decryptedAESKeyBuffer,
-                {
-                    name: "AES-GCM",
-                    length: 256
-                },
-                false,
-                ["decrypt"]
-            );
-
-            const encryptedMessageBuffer = this.base64ToArrayBuffer(data.encryptedMessage);
-            const ivBuffer = this.base64ToArrayBuffer(data.iv);
-
-            const decryptedMessageBuffer = await window.crypto.subtle.decrypt(
-                {
-                    name: "AES-GCM",
-                    iv: ivBuffer
-                },
-                aesKey,
-                encryptedMessageBuffer
-            );
-
-            const decoder = new TextDecoder();
-            return decoder.decode(decryptedMessageBuffer);
-        } catch (error) {
-            console.error('Error decrypting message:', error);
-            throw error;
+    // Helper methods
+    showLoadingOverlay(text = 'Loading...') {
+        const overlay = document.getElementById('loadingOverlay');
+        if (overlay) {
+            overlay.style.display = 'flex';
+            const textElement = overlay.querySelector('p');
+            if (textElement) textElement.textContent = text;
         }
     }
 
+    hideLoadingOverlay() {
+        const overlay = document.getElementById('loadingOverlay');
+        if (overlay) overlay.style.display = 'none';
+    }
+
+    /**
+     * Convert ArrayBuffer to Base64 string
+     */
     arrayBufferToBase64(buffer) {
         const binary = String.fromCharCode.apply(null, new Uint8Array(buffer));
         return btoa(binary);
     }
 
+    /**
+     * Convert Base64 string to ArrayBuffer
+     */
     base64ToArrayBuffer(base64) {
         const binary = atob(base64);
         const buffer = new ArrayBuffer(binary.length);
@@ -187,6 +364,9 @@ class E2ECrypto {
         return buffer;
     }
 
+    /**
+     * Generate unique message ID
+     */
     generateMessageId() {
         return 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     }
