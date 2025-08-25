@@ -33,24 +33,6 @@ class MessagingApp {
         }
     }
 
-    async init() {
-        // setTimeout(() => {
-        //     const loadingOverlay = document.getElementById('loadingOverlay');
-        //     if (loadingOverlay && window.getComputedStyle(loadingOverlay).display !== 'none') {
-        //         loadingOverlay.style.display = 'none';
-        //         this.showAuthModal();
-        //     }
-        // }, 5000);
-        
-        try {
-            await this.setupEventListeners();
-            await this.checkAuthToken();
-        } catch (error) {
-            console.error('App initialization failed:', error);
-            this.showAuthModal();
-        }
-    }
-
     /**
      * Check for existing authentication token and initialize app
      */
@@ -307,29 +289,6 @@ class MessagingApp {
         this.socket.on('message_error', (data) => {
             console.error('Message error:', data.error);
         });
-    }
-
-    async updateUserPublicKey(publicKey) {
-        try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('/api/user/publickey', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-auth-token': token
-                },
-                body: JSON.stringify({ publicKey })
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to update public key on server');
-            }
-            
-            console.log('✅ Public key updated on server');
-        } catch (error) {
-            console.error('Failed to update public key:', error);
-            // Don't throw - this is not critical for functionality
-        }
     }
 
     async loadContacts() {
