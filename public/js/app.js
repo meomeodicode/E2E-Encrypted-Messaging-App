@@ -12,6 +12,10 @@ class MessagingApp {
         this.onlineUsers = new Set();
         this.typingUsers = new Set();
         this.messages = new Map();
+        window.addEventListener('auth-failure', () => {
+            console.log('Authentication failure detected. Logging out.');
+            this.logout();
+        });
         this.init();
     }
 
@@ -180,69 +184,92 @@ class MessagingApp {
         const password = document.getElementById('password').value;
         const isLogin = document.getElementById('authTitle').textContent === 'Login';
         const errorDiv = document.getElementById('authError');
-
+    
         errorDiv.textContent = '';
-
+    
         if (!username || !password) {
             errorDiv.textContent = 'Please enter username and password';
             return;
         }
-
+    
+        document.getElementById('loadingOverlay').style.display = 'flex';
+        const loadingText = document.querySelector('#loadingOverlay p');
+    
         try {
-            const url = `/api/${isLogin ? 'login' : 'register'}`;
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
-            });
-
+            let response;
+            let requestBody = { username, password };
+            
+            // --- THE FIX: Part 1 ---
+            // We declare this here so it can be used both before and after the fetch call.
+            let cryptoForRegistration = null; 
+    
+            if (isLogin) {
+                // --- LOGIN LOGIC (unchanged) ---
+                if (loadingText) loadingText.textContent = 'Logging in...';
+                response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+    
+            } else {
+                // --- NEW REGISTRATION LOGIC ---
+                if (loadingText) loadingText.textContent = 'Generating encryption keys...';
+                
+                // 1. Generate keys and store the instance in our variable.
+                cryptoForRegistration = new E2ECrypto();
+                await cryptoForRegistration.generateKeyPair(); 
+                const publicKey = await cryptoForRegistration.exportPublicKey();
+    
+                // 2. Add the public key to the request body
+                requestBody.publicKey = publicKey;
+    
+                if (loadingText) loadingText.textContent = 'Creating account...';
+                response = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+            }
+    
             const data = await response.json();
-
+    
             if (response.ok) {
-                localStorage.setItem('token', data.token);
+                localStorage.setItem('accessToken', data.accessToken);
+                localStorage.setItem('refreshToken', data.refreshToken);
                 localStorage.setItem('user', JSON.stringify(data.user));
                 this.currentUser = data.user;
-
-                // Initialize encryption for the authenticated user
-                document.getElementById('loadingOverlay').style.display = 'flex';
-                const loadingText = document.querySelector('#loadingOverlay p');
-                if (loadingText) {
-                    loadingText.textContent = 'Setting up encryption...';
+    
+                // --- THE FIX: Part 2 ---
+                // For registration, we now save the keys from the *same instance* we used before.
+                if (!isLogin && cryptoForRegistration) {
+                    if (loadingText) loadingText.textContent = 'Securing your keys...';
+                    // This saves the correct key pair (KeyPair A) to localStorage.
+                    await cryptoForRegistration.saveKeyPair(data.user.id);
                 }
-                
-                try {
-                    await this.crypto.initializeForUser(data.user.id);
-                    const publicKey = await this.crypto.exportPublicKey();
-                    await this.updateUserPublicKey(publicKey);
-                    await this.initializeApp();
-                } catch (cryptoError) {
-                    console.error('Encryption setup failed:', cryptoError);
-                    document.getElementById('loadingOverlay').style.display = 'none';
-                    errorDiv.textContent = 'Failed to initialize encryption. Please try again.';
-                    this.clearAuthData();
-                }
+    
+                await this.crypto.initializeForUser(data.user.id);
+                await this.initializeApp();
+    
             } else {
                 errorDiv.textContent = data.error || 'Authentication failed';
             }
         } catch (error) {
             console.error('Authentication error:', error);
             errorDiv.textContent = 'Connection error. Please try again.';
+        } finally {
             document.getElementById('loadingOverlay').style.display = 'none';
         }
     }
 
     async updateUserPublicKey(publicKey) {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('/api/user/publickey', {
+            // Use the new API client
+            const response = await window.api.request('/api/user/publickey', {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-auth-token': token
-                },
                 body: JSON.stringify({ publicKey })
             });
-            
+    
             if (response.ok) {
                 console.log('✅ Public key updated on server');
             } else {
@@ -250,7 +277,6 @@ class MessagingApp {
             }
         } catch (error) {
             console.error('Error updating public key:', error);
-            // Don't throw - this is not critical for functionality
         }
     }
 
@@ -264,7 +290,7 @@ class MessagingApp {
     initializeSocket() {
         this.socket = io();
 
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('accessToken');
         this.socket.emit('authenticate', token);
 
         this.socket.on('authenticated', () => {
@@ -309,38 +335,11 @@ class MessagingApp {
         });
     }
 
-    async updateUserPublicKey(publicKey) {
-        try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('/api/user/publickey', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-auth-token': token
-                },
-                body: JSON.stringify({ publicKey })
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to update public key on server');
-            }
-            
-            console.log('✅ Public key updated on server');
-        } catch (error) {
-            console.error('Failed to update public key:', error);
-            // Don't throw - this is not critical for functionality
-        }
-    }
-
     async loadContacts() {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch('/api/users', {
-                headers: {
-                    'x-auth-token': token
-                }
-            });
-
+            // Use the new API client
+            const response = await window.api.request('/api/users');
+    
             if (response.ok) {
                 this.contacts = await response.json();
                 this.renderContacts();
@@ -424,22 +423,33 @@ class MessagingApp {
     /**
      * Load and decrypt message history for a contact
      */
-        async loadMessageHistory(contactId) {
+    async loadMessageHistory(contactId) {
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch(`/api/messages/${contactId}`, {
-                headers: { 'x-auth-token': token }
-            });
-
+            const token = localStorage.getItem('accessToken'); // Use accessToken
+            const response = await window.api.request(`/api/messages/${contactId}`);
+    
             if (!response.ok) {
                 throw new Error('Failed to load messages');
             }
-
-            const messages = await response.json();
+    
+            const messages = await response.json(); // These are the confirmed messages from the server
             const decryptedMessages = [];
-            
+    
+            // --- THE FIX STARTS HERE ---
+    
+            // 1. Get the IDs of all messages the server knows about.
+            const serverMessageIds = new Set(messages.map(msg => msg.id));
+    
+            // 2. Get the current list of messages from memory, which might contain unsaved local messages.
             const existingMessages = this.messages.get(contactId) || [];
-            const localMessages = existingMessages.filter(msg => msg.isLocal);
+            
+            // 3. Filter the existing messages to find ONLY the local ones that the server DOES NOT know about yet.
+            // This prevents the duplication.
+            const uniqueLocalMessages = existingMessages.filter(msg => {
+                return msg.isLocal && !serverMessageIds.has(msg.id);
+            });
+    
+            // --- THE FIX ENDS HERE ---
             
             for (const message of messages) {
                 const isSentByMe = message.sender_id === this.currentUser.id;
@@ -469,7 +479,6 @@ class MessagingApp {
                         });
                     }
                 } else {
-                    // Message is neither sent by me nor for me - shouldn't happen in a proper conversation
                     decryptedMessages.push({
                         ...message,
                         content: '[Message not for you]',
@@ -478,16 +487,17 @@ class MessagingApp {
                     });
                 }
             }
-
-            const allMessages = [...decryptedMessages, ...localMessages];
+    
+            // Combine the processed server messages with any truly unique local messages
+            const allMessages = [...decryptedMessages, ...uniqueLocalMessages];
             allMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
+    
             this.messages.set(contactId, allMessages);
             this.renderMessages();
         } catch (error) {
             console.error('Error loading message history:', error);
         }
-        }
+    }
 
     /**
      * Render all messages for the selected contact
@@ -539,31 +549,34 @@ class MessagingApp {
     async sendMessage() {
         const messageInput = document.getElementById('messageInput');
         const content = messageInput.value.trim();
-
+    
         if (!content || !this.selectedContact) {
             return;
         }
-
+    
         try {
-            const token = localStorage.getItem('token');
-            const response = await fetch(`/api/users/${this.selectedContact.username}/publickey`, {
-                headers: { 'x-auth-token': token }
-            });
-
+            // CHANGED: Replaced fetch with window.api.request.
+            // The API client automatically handles the authentication token.
+            const response = await window.api.request(`/api/users/${this.selectedContact.username}/publickey`);
+    
             if (!response.ok) {
                 throw new Error('Failed to get recipient public key');
             }
-
+    
             const { publicKey } = await response.json();
+            if (!publicKey) {
+                throw new Error('Recipient does not have a public key available.');
+            }
+            
             const encryptedContent = await this.crypto.encryptMessage(content, publicKey);
             const messageId = this.crypto.generateMessageId();
-
+    
             this.socket.emit('private_message', {
                 receiverId: this.selectedContact.id,
                 encryptedContent: encryptedContent,
                 messageId: messageId
             });
-
+    
             // Store message locally until server confirmation
             const messages = this.messages.get(this.selectedContact.id) || [];
             messages.push({
@@ -576,13 +589,13 @@ class MessagingApp {
                 isLocal: true 
             });
             this.messages.set(this.selectedContact.id, messages);
-
+    
             messageInput.value = '';
             this.renderMessages();
-
+    
         } catch (error) {
             console.error('Error sending message:', error);
-            alert('Failed to send message. Please try again.');
+            alert(`Failed to send message: ${error.message}. Please try again.`);
         }
     }
 
@@ -648,9 +661,18 @@ class MessagingApp {
     /**
      * Log out the user and clean up session data (but preserve encryption keys)
      */
-    logout() {
+    async logout() {
         // Clear authentication data only - KEEP encryption keys
-        localStorage.removeItem('token');
+        try {
+            // Call the server to invalidate the refresh token
+            await window.api.request('/api/logout', { method: 'POST' });
+        } catch (error) {
+            console.error("Logout API call failed, proceeding with client-side cleanup.", error);
+        }
+    
+        // Clear local storage
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
         localStorage.removeItem('user');
         
         // Disconnect socket
