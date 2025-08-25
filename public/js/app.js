@@ -59,12 +59,25 @@ class MessagingApp {
      * Check for existing authentication token and initialize app
      */
     async checkAuthToken() {
-        const token = localStorage.getItem('token');
+        const accessToken = localStorage.getItem('accessToken');
+        const refreshToken = localStorage.getItem('refreshToken');
         const user = localStorage.getItem('user');
 
-        if (token && user) {
+        if (refreshToken && user) {
             try {
                 this.currentUser = JSON.parse(user);
+
+                // If there's no access token, try to get a new one with the refresh token
+                if (!accessToken) {
+                    const newAccessToken = await window.api.refreshToken();
+                    if (!newAccessToken) {
+                        // If refresh fails, clear auth data and show login
+                        this.clearAuthData();
+                        this.showAuthModal();
+                        return;
+                    }
+                }
+                
                 await this.crypto.initializeForUser(this.currentUser.id);
                 await this.initializeApp();
             } catch (error) {
@@ -82,7 +95,8 @@ class MessagingApp {
      */
     clearAuthData() {
         // Clear authentication data only - KEEP encryption keys
-        localStorage.removeItem('token');
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
         localStorage.removeItem('user');
         
         // Reset crypto instance but don't clear keys from localStorage
