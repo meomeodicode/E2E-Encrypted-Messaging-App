@@ -15,6 +15,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const app = express();
+app.set('trust proxy', 1);
+app.use((req, res, next) => {
+    console.log(`[DEBUG] Request IP for rate limiter: ${req.ip}`);
+    next();
+});
 const server = http.createServer(app);
 const io = socketIo(server, {
     cors: {
@@ -40,7 +45,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
-    max: 100 
+    max: 1000
 });
 app.use(limiter);
 
@@ -83,11 +88,19 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initializeDatabase() {
     db.serialize(() => {
+        db.run(`ALTER TABLE users ADD COLUMN refresh_token TEXT`, (err) => {
+            if (err && !err.message.includes('duplicate column name')) {
+                // An error occurred that wasn't just the column already existing
+                console.error("Error adding refresh_token column:", err.message);
+            }
+        });
+
         db.run(`CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             public_key TEXT,
+            refresh_token TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
 
@@ -143,31 +156,52 @@ const verifyToken = (req, res, next) => {
  */
 app.post('/api/register', async (req, res) => {
     try {
+        // 1. Accept publicKey from the request body
         const { username, password, publicKey } = req.body;
 
         if (!username || !password) {
             return res.status(400).json({ error: 'Username and password are required' });
         }
+        // We now expect a public key on registration
+        if (!publicKey) {
+            return res.status(400).json({ error: 'Public key is required for registration' });
+        }
 
         db.get('SELECT id FROM users WHERE username = ?', [username], async (err, row) => {
-            if (err) {
-                return res.status(500).json({ error: 'Database error' });
-            }
-            if (row) {
-                return res.status(400).json({ error: 'Username already exists' });
-            }
+            if (err) return res.status(500).json({ error: 'Database error' });
+            if (row) return res.status(400).json({ error: 'Username already exists' });
 
             const passwordHash = await bcrypt.hash(password, 10);
             const userId = uuidv4();
 
+            // 2. Insert the user WITH the public key in one atomic operation
             db.run('INSERT INTO users (id, username, password_hash, public_key) VALUES (?, ?, ?, ?)', 
                 [userId, username, passwordHash, publicKey], function(err) {
-                if (err) {
-                    return res.status(500).json({ error: 'Failed to create user' });
-                }
+                if (err) return res.status(500).json({ error: 'Failed to create user' });
 
-                const token = jwt.sign({ id: userId, username }, JWT_SECRET, { expiresIn: '24h' });
-                res.json({ token, user: { id: userId, username } });
+                // 3. Generate BOTH an access token and a refresh token
+                const accessToken = jwt.sign(
+                    { id: userId, username },
+                    JWT_SECRET,
+                    { expiresIn: process.env.ACCESS_TOKEN_EXPIRATION || '15m' }
+                );
+                const refreshToken = jwt.sign(
+                    { id: userId, username },
+                    process.env.REFRESH_TOKEN_SECRET,
+                    { expiresIn: process.env.REFRESH_TOKEN_EXPIRATION || '7d' }
+                );
+
+                // 4. Store the refresh token in the database
+                db.run('UPDATE users SET refresh_token = ? WHERE id = ?', [refreshToken, userId], (err) => {
+                    if (err) return res.status(500).json({ error: 'Failed to store refresh token' });
+
+                    // 5. Send both tokens and the user object back to the client
+                    res.json({
+                        accessToken,
+                        refreshToken,
+                        user: { id: userId, username }
+                    });
+                });
             });
         });
     } catch (error) {
@@ -187,33 +221,77 @@ app.post('/api/login', async (req, res) => {
         }
 
         db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
-            if (err) {
-                return res.status(500).json({ error: 'Database error' });
-            }
-            if (!user) {
-                return res.status(400).json({ error: 'Invalid credentials' });
-            }
+            if (err) return res.status(500).json({ error: 'Database error' });
+            if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
             const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-            if (!isPasswordValid) {
-                return res.status(400).json({ error: 'Invalid credentials' });
-            }
+            if (!isPasswordValid) return res.status(400).json({ error: 'Invalid credentials' });
 
-            const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
-            res.json({ 
-                token, 
-                user: { 
-                    id: user.id, 
-                    username: user.username,
-                    publicKey: user.public_key
-                } 
+            // Generate Tokens
+            const accessToken = jwt.sign(
+                { id: user.id, username: user.username },
+                JWT_SECRET,
+                { expiresIn: process.env.ACCESS_TOKEN_EXPIRATION || '15m' }
+            );
+            const refreshToken = jwt.sign(
+                { id: user.id, username: user.username },
+                process.env.REFRESH_TOKEN_SECRET,
+                { expiresIn: process.env.REFRESH_TOKEN_EXPIRATION || '7d' }
+            );
+
+            // Store refresh token in the database
+            db.run('UPDATE users SET refresh_token = ? WHERE id = ?', [refreshToken, user.id], (err) => {
+                if (err) return res.status(500).json({ error: 'Failed to store refresh token' });
+
+                res.json({
+                    accessToken,
+                    refreshToken,
+                    user: {
+                        id: user.id,
+                        username: user.username,
+                        publicKey: user.public_key
+                    }
+                });
             });
         });
     } catch (error) {
         res.status(500).json({ error: 'Server error' });
     }
 });
+app.post('/api/token', (req, res) => {
+    const { token } = req.body;
 
+    if (!token) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+
+    db.get('SELECT * FROM users WHERE refresh_token = ?', [token], (err, user) => {
+        if (err) return res.status(500).json({ error: 'Database error' });
+        if (!user) return res.status(403).json({ error: 'Invalid refresh token' });
+
+        jwt.verify(token, process.env.REFRESH_TOKEN_SECRET, (err, decoded) => {
+            if (err) return res.status(403).json({ error: 'Invalid refresh token' });
+
+            const accessToken = jwt.sign(
+                { id: user.id, username: user.username },
+                JWT_SECRET,
+                { expiresIn: process.env.ACCESS_TOKEN_EXPIRATION || '15m' }
+            );
+
+            res.json({ accessToken });
+        });
+    });
+});
+
+app.post('/api/logout', verifyToken, (req, res) => {
+    const userId = req.user.id;
+    db.run('UPDATE users SET refresh_token = NULL WHERE id = ?', [userId], (err) => {
+        if (err) {
+            return res.status(500).json({ error: 'Logout failed' });
+        }
+        res.status(200).json({ success: true, message: 'Logged out successfully' });
+    });
+});
 /**
  * Get user's public key endpoint
  */
@@ -249,7 +327,7 @@ app.get('/api/debug/messages', verifyToken, (req, res) => {
         SELECT id, sender_id, receiver_id, 
                LENGTH(encrypted_content) as content_length,
                encrypted_content,
-               datetime(timestamp, 'localtime') as timestamp
+               timestamp as timestamp
         FROM messages 
         WHERE sender_id = ? OR receiver_id = ?
         ORDER BY timestamp DESC 
