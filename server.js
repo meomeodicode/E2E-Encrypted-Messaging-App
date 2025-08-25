@@ -49,32 +49,62 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-function validateOrGenerateJWT() {
-    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
-        console.warn('⚠️  Generating new JWT_SECRET...');
-        const newSecret = crypto.randomBytes(64).toString('hex');
-        process.env.JWT_SECRET = newSecret;
-        let envContent = '';
-        if (fs.existsSync('.env')) {
-            envContent = fs.readFileSync('.env', 'utf8');
-        }
-        if (envContent.includes('JWT_SECRET=')) {
-            envContent = envContent.replace(/JWT_SECRET=.*/, `JWT_SECRET=${newSecret}`);
-        } else {
-            envContent += `JWT_SECRET=${newSecret}\n`;
-        }
-        
-        fs.writeFileSync('.env', envContent);
-        console.log('✅ Generated and saved JWT_SECRET to .env');
-    } else if (process.env.JWT_SECRET.length < 32) {
-        console.error('❌ JWT_SECRET is too short (minimum 32 characters)');
-        process.exit(1);
-    }
-    
-    return process.env.JWT_SECRET;
-}
+function initializeEnvironment() {
+    const envPath = '.env';
 
-const JWT_SECRET = validateOrGenerateJWT();
+    // Define all required environment variables, their validation rules, and generators.
+    const requiredEnvVars = {
+        JWT_SECRET: {
+            validate: (value) => value && value.length >= 32,
+            generate: () => crypto.randomBytes(64).toString('hex'),
+            message: 'JWT_SECRET is missing or too short. Generating a new secure secret.'
+        },
+        REFRESH_TOKEN_SECRET: {
+            validate: (value) => value && value.length >= 32,
+            generate: () => crypto.randomBytes(64).toString('hex'),
+            message: 'REFRESH_TOKEN_SECRET is missing. Generating a new secure secret.'
+        },
+        ACCESS_TOKEN_EXPIRATION: {
+            validate: (value) => !!value, // Just needs to exist
+            generate: () => '15m',
+            message: 'ACCESS_TOKEN_EXPIRATION is missing. Setting default value "15m".'
+        },
+        REFRESH_TOKEN_EXPIRATION: {
+            validate: (value) => !!value,
+            generate: () => '7d',
+            message: 'REFRESH_TOKEN_EXPIRATION is missing. Setting default value "7d".'
+        }
+    };
+
+    let contentToAppend = '';
+
+    for (const [key, config] of Object.entries(requiredEnvVars)) {
+        // Check if the variable is missing or invalid in the currently loaded environment
+        if (!config.validate(process.env[key])) {
+            console.warn(`⚠️  ${config.message}`);
+            const newValue = config.generate();
+            
+            // Prepare to append the new variable to the .env file
+            contentToAppend += `${key}=${newValue}\n`;
+            
+            // IMPORTANT: Immediately set it in the current process's environment
+            // so the app can use it without a restart.
+            process.env[key] = newValue;
+        }
+    }
+
+    // If any variables were generated, append them to the .env file
+    if (contentToAppend) {
+        try {
+            fs.appendFileSync(envPath, '\n' + contentToAppend);
+            console.log('✅ Successfully updated .env file with missing variables.');
+        } catch (error) {
+            console.error('❌ Failed to write to .env file:', error);
+        }
+    }
+}
+initializeEnvironment();
+const JWT_SECRET = process.env.JWT_SECRET;
 const dbPath = process.env.DATABASE_PATH || './messaging.db';
 const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
