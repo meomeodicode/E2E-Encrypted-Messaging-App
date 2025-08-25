@@ -15,6 +15,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const app = express();
+app.set('trust proxy', 1);
+app.use((req, res, next) => {
+    console.log(`[DEBUG] Request IP for rate limiter: ${req.ip}`);
+    next();
+});
 const server = http.createServer(app);
 const io = socketIo(server, {
     cors: {
