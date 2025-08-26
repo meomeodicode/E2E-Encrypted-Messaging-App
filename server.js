@@ -48,33 +48,91 @@ const limiter = rateLimit({
     max: 1000
 });
 app.use(limiter);
+// Digital Signature functions
+const { subtle } = require('crypto').webcrypto;
 
-function validateOrGenerateJWT() {
-    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
-        console.warn('⚠️  Generating new JWT_SECRET...');
-        const newSecret = crypto.randomBytes(64).toString('hex');
-        process.env.JWT_SECRET = newSecret;
-        let envContent = '';
-        if (fs.existsSync('.env')) {
-            envContent = fs.readFileSync('.env', 'utf8');
-        }
-        if (envContent.includes('JWT_SECRET=')) {
-            envContent = envContent.replace(/JWT_SECRET=.*/, `JWT_SECRET=${newSecret}`);
-        } else {
-            envContent += `JWT_SECRET=${newSecret}\n`;
-        }
-        
-        fs.writeFileSync('.env', envContent);
-        console.log('✅ Generated and saved JWT_SECRET to .env');
-    } else if (process.env.JWT_SECRET.length < 32) {
-        console.error('❌ JWT_SECRET is too short (minimum 32 characters)');
-        process.exit(1);
-    }
-    
-    return process.env.JWT_SECRET;
+async function verifyMessage(publicKey, message, signatureB64) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const signature = Buffer.from(signatureB64, 'base64');
+
+  return await subtle.verify(
+    {
+      name: "RSA-PSS",
+      saltLength: 32,
+    },
+    publicKey,
+    signature,
+    data
+  );
 }
 
-const JWT_SECRET = validateOrGenerateJWT();
+async function importSpkiRsaPss(b64) {
+  const spki = Buffer.from(b64, 'base64');
+  return await subtle.importKey(
+    "spki",
+    spki,
+    { name: "RSA-PSS", hash: "SHA-256" },
+    true,
+    ["verify"]
+  );
+}
+// End Digital Signature functions
+function initializeEnvironment() {
+    const envPath = '.env';
+
+    // Define all required environment variables, their validation rules, and generators.
+    const requiredEnvVars = {
+        JWT_SECRET: {
+            validate: (value) => value && value.length >= 32,
+            generate: () => crypto.randomBytes(64).toString('hex'),
+            message: 'JWT_SECRET is missing or too short. Generating a new secure secret.'
+        },
+        REFRESH_TOKEN_SECRET: {
+            validate: (value) => value && value.length >= 32,
+            generate: () => crypto.randomBytes(64).toString('hex'),
+            message: 'REFRESH_TOKEN_SECRET is missing. Generating a new secure secret.'
+        },
+        ACCESS_TOKEN_EXPIRATION: {
+            validate: (value) => !!value, // Just needs to exist
+            generate: () => '15m',
+            message: 'ACCESS_TOKEN_EXPIRATION is missing. Setting default value "15m".'
+        },
+        REFRESH_TOKEN_EXPIRATION: {
+            validate: (value) => !!value,
+            generate: () => '7d',
+            message: 'REFRESH_TOKEN_EXPIRATION is missing. Setting default value "7d".'
+        }
+    };
+
+    let contentToAppend = '';
+
+    for (const [key, config] of Object.entries(requiredEnvVars)) {
+        // Check if the variable is missing or invalid in the currently loaded environment
+        if (!config.validate(process.env[key])) {
+            console.warn(`⚠️  ${config.message}`);
+            const newValue = config.generate();
+            
+            // Prepare to append the new variable to the .env file
+            contentToAppend += `${key}=${newValue}\n`;
+            
+            // IMPORTANT: Immediately set it in the current process's environment
+            // so the app can use it without a restart.
+            process.env[key] = newValue;
+        }
+    }
+    // If any variables were generated, append them to the .env file
+    if (contentToAppend) {
+        try {
+            fs.appendFileSync(envPath, '\n' + contentToAppend);
+            console.log('✅ Successfully updated .env file with missing variables.');
+        } catch (error) {
+            console.error('❌ Failed to write to .env file:', error);
+        }
+    }
+}
+initializeEnvironment();
+const JWT_SECRET = process.env.JWT_SECRET;    
 const dbPath = process.env.DATABASE_PATH || './messaging.db';
 const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
@@ -88,27 +146,25 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initializeDatabase() {
     db.serialize(() => {
-        db.run(`ALTER TABLE users ADD COLUMN refresh_token TEXT`, (err) => {
-            if (err && !err.message.includes('duplicate column name')) {
-                // An error occurred that wasn't just the column already existing
-                console.error("Error adding refresh_token column:", err.message);
-            }
-        });
-
+        // Users table
         db.run(`CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             public_key TEXT,
             refresh_token TEXT,
+            signing_public_key TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
-
+        //Digital Signature
         db.run(`CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             sender_id TEXT NOT NULL,
             receiver_id TEXT NOT NULL,
             encrypted_content TEXT NOT NULL,
+            signature TEXT,
+            sig_algo TEXT,
+            signing_timestamp TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (sender_id) REFERENCES users (id),
             FOREIGN KEY (receiver_id) REFERENCES users (id)
@@ -130,6 +186,23 @@ function initializeDatabase() {
             FOREIGN KEY (room_id) REFERENCES rooms (id),
             FOREIGN KEY (user_id) REFERENCES users (id)
         )`);
+
+        // Attempt to add new columns, ignoring errors if they already exist
+        const alterTableQueries = [
+            'ALTER TABLE users ADD COLUMN refresh_token TEXT',
+            'ALTER TABLE users ADD COLUMN signing_public_key TEXT',
+            'ALTER TABLE messages ADD COLUMN signature TEXT',
+            'ALTER TABLE messages ADD COLUMN sig_algo TEXT',
+            'ALTER TABLE messages ADD COLUMN signing_timestamp TEXT'
+        ];
+
+        alterTableQueries.forEach(query => {
+            db.run(query, (err) => {
+                if (err && !err.message.includes('duplicate column name')) {
+                    console.error(`Error executing '${query}':`, err.message);
+                }
+            });
+        });
     });
 }
 
@@ -405,6 +478,46 @@ app.get('/api/messages/:userId', verifyToken, (req, res) => {
 const connectedUsers = new Map();
 
 /**
+ * Digital Signature: signing public key routes
+ */
+
+app.put('/api/user/signingkey', verifyToken, (req, res) => {
+    const { signingPublicKey } = req.body;
+    const userId = req.user.id;
+    
+    if (!signingPublicKey) {
+        return res.status(400).json({ error: 'Signing public key is required' });
+    }
+    
+    db.run('UPDATE users SET signing_public_key = ? WHERE id = ?', [signingPublicKey, userId], function(err) {
+        if (err) {
+            console.error('Failed to update signing public key:', err);
+            return res.status(500).json({ error: 'Failed to update signing public key' });
+        }
+        
+        if (this.changes === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        return res.json({ success: true });
+    });
+});
+
+app.get('/api/user/:username/signingkey', verifyToken, (req, res) => {
+    const username = req.params.username;
+    db.get('SELECT signing_public_key, username FROM users WHERE username = ?', [username], (err, row) => {
+        if (err) {
+            return res.status(500).json({ error: 'Database error' });
+        }
+        if (!row || !row.signing_public_key) {
+            return res.status(404).json({ error: 'No signing key' });
+        }
+
+        return res.json({ signingPublicKey: row.signing_public_key });
+    });
+});
+
+/**
  * Socket.IO connection handling
  */
 io.on('connection', (socket) => {
@@ -426,9 +539,9 @@ io.on('connection', (socket) => {
             socket.emit('authentication_error', { error: 'Invalid token' });
         }
     });
-
+    // Signature fields added
     socket.on('private_message', (data) => {
-        const { receiverId, encryptedContent, messageId } = data;
+        const { receiverId, encryptedContent, messageId, signature, signingTimestamp } = data;
         const senderId = socket.userId;
 
         if (!senderId) {
@@ -436,27 +549,32 @@ io.on('connection', (socket) => {
             return;
         }
 
-        db.run('INSERT INTO messages (id, sender_id, receiver_id, encrypted_content) VALUES (?, ?, ?, ?)',
-            [messageId, senderId, receiverId, encryptedContent], function(err) {
-            if (err) {
+        db.run(
+            'INSERT INTO messages (id, sender_id, receiver_id, encrypted_content, signature, signing_timestamp, sig_algo) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [messageId, senderId, receiverId, encryptedContent, signature, signingTimestamp, 'RSA-PSS'],
+            function (err) {
+            if (err) { 
                 console.error('Error storing message:', err);
                 socket.emit('message_error', { error: 'Failed to store message' });
-                return;
+                return; 
             }
 
             const recipientSocketId = connectedUsers.get(receiverId);
             if (recipientSocketId) {
                 io.to(recipientSocketId).emit('new_message', {
                     id: messageId,
-                    senderId: senderId,
+                    senderId,
+                    receiverId, // Added receiverId New
                     senderUsername: socket.username,
-                    encryptedContent: encryptedContent,
-                    timestamp: new Date().toISOString()
+                    encryptedContent,
+                    signature,
+                    signingTimestamp,
+                    timestamp: new Date().toISOString(),
                 });
             }
-
             socket.emit('message_sent', { messageId });
-        });
+            }
+        );
     });
 
     socket.on('typing_start', (data) => {

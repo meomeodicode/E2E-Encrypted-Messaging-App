@@ -61,6 +61,16 @@ class MessagingApp {
                 }
                 
                 await this.crypto.initializeForUser(this.currentUser.id);
+                try {
+                    const { privateKey: signPriv } = await getOrCreateSigningKeyPair(this.currentUser.id);
+                    this.signPrivateKey = signPriv;
+                    console.log('✅ Signing key loaded into application state.');
+                } catch (err) {
+                    console.error('⚠️ Failed to load signing key on session resume:', err);
+                    alert('Error loading your signing key. Please log in again.');
+                    this.logout();
+                    return;
+                }
                 await this.initializeApp();
             } catch (error) {
                 console.error('Authentication initialization failed:', error);
@@ -235,7 +245,31 @@ class MessagingApp {
                 localStorage.setItem('refreshToken', data.refreshToken);
                 localStorage.setItem('user', JSON.stringify(data.user));
                 this.currentUser = data.user;
-    
+                
+                //Digital Signature: create & upload signing public key ===
+                try {
+                    const { privateKey: signPriv, publicKeySpkiB64: signPubB64 } =
+                        await getOrCreateSigningKeyPair(this.currentUser.id);
+
+                    this.signPrivateKey = signPriv;
+
+                    const res = await fetch('/api/user/signingkey', {
+                        method: 'PUT',
+                        headers: {
+                        'Content-Type': 'application/json',
+                        'x-auth-token': data.accessToken   // localStorage.getItem('accessToken')
+                        },
+                        body: JSON.stringify({ signingPublicKey: signPubB64 })
+                    });
+
+                    if (!res.ok) {
+                        console.warn('⚠️ Failed to upload signing key:', await res.text());
+                    } else {
+                        console.log('✅ Signing key uploaded');
+                    }
+                } catch (err) {
+                    console.error('⚠️ Error generating/uploading signing key:', err);
+                }
                 // --- THE FIX: Part 2 ---
                 // For registration, we now save the keys from the *same instance* we used before.
                 if (!isLogin && cryptoForRegistration) {
@@ -564,13 +598,28 @@ class MessagingApp {
                 throw new Error('Recipient does not have a public key available.');
             }
             
+            // Prepare and sign the message ===
+            const timestamp = new Date().toISOString();
+            const payloadToSign = JSON.stringify({
+                senderId: this.currentUser.id,
+                receiverId: this.selectedContact.id,
+                plaintext: content,
+                timestamp
+            });
+
+            const signature = await signMessage(this.signPrivateKey, payloadToSign);
+            
+            // Encrypt the message content
             const encryptedContent = await this.crypto.encryptMessage(content, publicKey);
             const messageId = this.crypto.generateMessageId();
-    
+            
+            // Send the encrypted message via socket
             this.socket.emit('private_message', {
                 receiverId: this.selectedContact.id,
                 encryptedContent: encryptedContent,
-                messageId: messageId
+                messageId: messageId,
+                signature: signature,
+                signingTimestamp: timestamp
             });
     
             // Store message locally until server confirmation
@@ -580,7 +629,7 @@ class MessagingApp {
                 sender_id: this.currentUser.id,
                 receiver_id: this.selectedContact.id,
                 content: content, 
-                timestamp: new Date().toISOString(),
+                timestamp: timestamp,
                 isSent: true,
                 isLocal: true 
             });
@@ -598,10 +647,63 @@ class MessagingApp {
     /**
      * Handle incoming encrypted messages from other users
      */
+
     async handleNewMessage(data) {
         try {
-            const decryptedContent = await this.crypto.decryptMessage(data.encryptedContent);
+            console.log("👉 Step 1: handleNewMessage START", data);
+            
+            console.log("👉 Step 2: check receiverId");
+            if (data.receiverId !== this.currentUser.id) {
+                console.warn('⚠️ Message not intended for this user');
+            }
+            
+            console.log("👉 Step 3: start decrypt");
+            let decryptedContent;
+            try {
+                decryptedContent = await this.crypto.decryptMessage(data.encryptedContent); 
+            } catch (error) {
+                console.error('Failed to decrypt incoming message:', error);
+                return;
+            }
+            console.log("✅ Step 3: decryptedContent =", decryptedContent);
 
+            console.log("👉 Step 4: build payloadToVerify");
+            const payloadToVerify = JSON.stringify({
+                senderId: data.senderId,
+                receiverId: data.receiverId,
+                plaintext: decryptedContent,
+                timestamp: data.signingTimestamp,
+            });
+
+            console.log("👉 Step 5: fetch or get signingPublicKey");
+            if (!this.signingKeys) this.signingKeys = new Map();
+            let signingPublicKey = this.signingKeys.get(data.senderId);
+
+            if (!signingPublicKey) {
+                console.log("👉 Step 5a: fetch from API");
+                const response = await window.api.request(
+                    `/api/user/${encodeURIComponent(data.senderUsername)}/signingkey`
+                );
+                if (response.ok) {
+                    const result = await response.json();
+                    signingPublicKey = await importSpkiRsaPss(result.signingPublicKey);
+                    this.signingKeys.set(data.senderId, signingPublicKey);
+                } else {
+                    console.warn('⚠️ Could not fetch signing key for user:', data.senderUsername);
+                    return; 
+                }
+            }
+
+            console.log("👉 Step 6: verify signature");
+            const isValid = await verifyMessage(signingPublicKey, payloadToVerify, data.signature);
+            console.log("✅ Step 6: isValid =", isValid);
+            if (!isValid) {
+                console.warn("⚠️ Message signature invalid!");
+                return;
+            }
+
+            console.log("👉 Step 7: store and render");
+            // Store the verified message
             const messages = this.messages.get(data.senderId) || [];
             messages.push({
                 id: data.id,

@@ -286,47 +286,47 @@ class E2ECrypto {
      * @param {string} encryptedData - Encrypted message as JSON string
      * @returns {Promise<string>} Decrypted plain text message
      */
-   async decryptMessage(encryptedData) {
+    async decryptMessage(encryptedData) {
 
-    if (!this.keyPair || !this.keyPair.privateKey) {
-        throw new Error('Key pair not available');
+        if (!this.keyPair || !this.keyPair.privateKey) {
+            throw new Error('Key pair not available');
+        }
+        
+        try {
+            const data = JSON.parse(encryptedData);
+            const encryptedAESKey = this.base64ToArrayBuffer(data.encryptedAESKey);
+            
+            const aesKeyBuffer = await window.crypto.subtle.decrypt(
+                { name: "RSA-OAEP" },
+                this.keyPair.privateKey,
+                encryptedAESKey
+            );
+            
+            const aesKey = await window.crypto.subtle.importKey(
+                "raw",
+                aesKeyBuffer,
+                { name: "AES-GCM" },
+                false,
+                ["decrypt"]
+            );
+            
+            const encryptedContent = this.base64ToArrayBuffer(data.encryptedContent);
+            const iv = this.base64ToArrayBuffer(data.iv);
+            
+            const decryptedBuffer = await window.crypto.subtle.decrypt(
+                {
+                    name: "AES-GCM",
+                    iv: iv
+                },
+                aesKey,
+                encryptedContent
+            );
+            
+            return new TextDecoder().decode(decryptedBuffer);
+        } catch (error) {
+            throw error;
+        }
     }
-    
-    try {
-        const data = JSON.parse(encryptedData);
-        const encryptedAESKey = this.base64ToArrayBuffer(data.encryptedAESKey);
-        
-        const aesKeyBuffer = await window.crypto.subtle.decrypt(
-            { name: "RSA-OAEP" },
-            this.keyPair.privateKey,
-            encryptedAESKey
-        );
-        
-        const aesKey = await window.crypto.subtle.importKey(
-            "raw",
-            aesKeyBuffer,
-            { name: "AES-GCM" },
-            false,
-            ["decrypt"]
-        );
-        
-        const encryptedContent = this.base64ToArrayBuffer(data.encryptedContent);
-        const iv = this.base64ToArrayBuffer(data.iv);
-        
-        const decryptedBuffer = await window.crypto.subtle.decrypt(
-            {
-                name: "AES-GCM",
-                iv: iv
-            },
-            aesKey,
-            encryptedContent
-        );
-        
-        return new TextDecoder().decode(decryptedBuffer);
-    } catch (error) {
-        throw error;
-    }
-}
 
     // Helper methods
     showLoadingOverlay(text = 'Loading...') {
@@ -372,4 +372,106 @@ class E2ECrypto {
     }
 }
 
+//Digital Signature
+function arrayBufferToBase64(buffer) {
+    const binary = String.fromCharCode.apply(null, new Uint8Array(buffer));
+    return btoa(binary);
+}
+
+function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+        const buffer = new ArrayBuffer(binary.length);
+        const view = new Uint8Array(buffer);
+        for (let i = 0; i < binary.length; i++) {
+            view[i] = binary.charCodeAt(i);
+        }
+        return buffer;
+}
+
+async function getOrCreateSigningKeyPair(userId) {
+    const priv64 = localStorage.getItem(`signingPrivateKey_${userId}`);
+    const pub64 = localStorage.getItem(`signingPublicKey_${userId}`);
+
+    if (priv64 && pub64) {
+        const privateKey = await importPkcs8RsaPss(priv64);
+        return { privateKey, publicKeySpkiB64: pub64 };
+    }
+
+    const keyPair = await crypto.subtle.generateKey(
+        { name: "RSA-PSS", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+        true,
+        ["sign", "verify"]
+    );
+    const pkcs8 = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+    const spki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+
+    const privB64 = arrayBufferToBase64(pkcs8);
+    const pubB64  = arrayBufferToBase64(spki);
+
+    localStorage.setItem(`signingPrivateKey_${userId}`, privB64);
+    localStorage.setItem(`signingPublicKey_${userId}`,  pubB64);
+
+    return { privateKey: keyPair.privateKey, publicKeySpkiB64: pubB64 };
+}
+window.getOrCreateSigningKeyPair = getOrCreateSigningKeyPair;
+
+async function importPkcs8RsaPss(b64) {
+    const pkcs8 = base64ToArrayBuffer(b64);
+    return crypto.subtle.importKey(
+        "pkcs8",
+        pkcs8,
+        { name: "RSA-PSS", hash: "SHA-256" },
+        true,
+        ["sign"]
+    );
+}
+window.importPkcs8RsaPss = importPkcs8RsaPss;
+
+async function signMessage(privateKey, message) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+
+  const signature = await crypto.subtle.sign(
+    {
+      name: "RSA-PSS",
+      saltLength: 32,
+    },
+    privateKey,
+    data
+  );
+
+  return arrayBufferToBase64(signature);
+}
+window.signMessage = signMessage;
+
+async function verifyMessage(publicKey, message, signatureB64) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(message);
+    const signature = base64ToArrayBuffer(signatureB64);
+
+    return await crypto.subtle.verify(
+        {
+            name: "RSA-PSS",
+            saltLength: 32, // Must match signing salt length
+        },
+        publicKey,
+        signature,
+        data
+    );
+}
+window.verifyMessage = verifyMessage;
+
+async function importSpkiRsaPss(b64) {
+    const spki = base64ToArrayBuffer(b64);
+    return crypto.subtle.importKey(
+        "spki",
+        spki,
+        { name: "RSA-PSS", hash: "SHA-256" },
+        true,
+        ["verify"]
+    );
+}
+window.importSpkiRsaPss = importSpkiRsaPss;
+
 window.E2ECrypto = E2ECrypto;
+
