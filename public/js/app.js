@@ -345,6 +345,15 @@ class MessagingApp {
             this.onlineUsers.delete(data.userId);
             this.updateContactStatus(data.userId, false);
         });
+        
+        this.socket.on('initial_online_users', (onlineUserIds) => {
+            console.log('Received initial list of online users:', onlineUserIds);
+            this.onlineUsers = new Set(onlineUserIds);
+            
+            if (this.contacts.length > 0) {
+                this.renderContacts();
+            }
+        });
 
         this.socket.on('user_typing', (data) => {
             this.typingUsers.add(data.userId);

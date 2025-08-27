@@ -146,6 +146,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initializeDatabase() {
     db.serialize(() => {
+        // Fix Create tables if they don't exist first
         // Users table
         db.run(`CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
@@ -535,6 +536,11 @@ io.on('connection', (socket) => {
                 userId: decoded.id, 
                 username: decoded.username 
             });
+
+            const onlineUserIds = Array.from(connectedUsers.keys());
+            socket.emit('initial_online_users', onlineUserIds);
+            console.log(`Sent initial online list to ${decoded.username}:`, onlineUserIds);
+
         } catch (error) {
             socket.emit('authentication_error', { error: 'Invalid token' });
         }
