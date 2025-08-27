@@ -54,6 +54,7 @@ For **Authentication (Authenticity & Integrity)**:
 - **Confidentiality**: Only intended recipients can decrypt messages
 - **Integrity**: AES-GCM provides authenticated encryption for the content, and the digital signature ensures the integrity of the entire message payload
 - **Authenticity**: Digital signatures ensure that messages originate from the claimed sender.
+- **Non-repudiation** (Partial): The sender cannot easily deny sending a message they have signed, as long as their signing private key is not compromised.
 - **Key Verification**: No public key fingerprint verification implemented
 - **Forward Secrecy**: Not implemented (messages remain decryptable if keys are compromised)
 
