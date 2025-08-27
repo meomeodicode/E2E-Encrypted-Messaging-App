@@ -316,7 +316,7 @@ class MessagingApp {
         this.initializeSocket();
         await this.loadContacts();
     }
-
+    
     initializeSocket() {
         this.socket = io();
 
