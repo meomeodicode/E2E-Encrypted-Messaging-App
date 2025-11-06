@@ -27,12 +27,9 @@ class ApiClient {
             const newAccessToken = await this.refreshToken();
 
             if (newAccessToken) {
-                // Retry the original request with the new token
                 config.headers['x-auth-token'] = newAccessToken;
                 response = await fetch(this.baseUrl + endpoint, config);
             } else {
-                // If refresh fails, logout the user
-                // This could be handled by emitting a custom event
                 window.dispatchEvent(new CustomEvent('auth-failure'));
                 return Promise.reject('Authentication failed');
             }
@@ -70,5 +67,4 @@ class ApiClient {
     }
 }
 
-// Export a singleton instance
 window.api = new ApiClient();

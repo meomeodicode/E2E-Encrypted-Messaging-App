@@ -48,7 +48,6 @@ const limiter = rateLimit({
     max: 1000
 });
 app.use(limiter);
-// Digital Signature functions
 const { subtle } = require('crypto').webcrypto;
 
 async function verifyMessage(publicKey, message, signatureB64) {
@@ -77,11 +76,9 @@ async function importSpkiRsaPss(b64) {
     ["verify"]
   );
 }
-// End Digital Signature functions
 function initializeEnvironment() {
     const envPath = '.env';
 
-    // Define all required environment variables, their validation rules, and generators.
     const requiredEnvVars = {
         JWT_SECRET: {
             validate: (value) => value && value.length >= 32,
@@ -94,7 +91,7 @@ function initializeEnvironment() {
             message: 'REFRESH_TOKEN_SECRET is missing. Generating a new secure secret.'
         },
         ACCESS_TOKEN_EXPIRATION: {
-            validate: (value) => !!value, // Just needs to exist
+            validate: (value) => !!value, 
             generate: () => '15m',
             message: 'ACCESS_TOKEN_EXPIRATION is missing. Setting default value "15m".'
         },
@@ -108,26 +105,19 @@ function initializeEnvironment() {
     let contentToAppend = '';
 
     for (const [key, config] of Object.entries(requiredEnvVars)) {
-        // Check if the variable is missing or invalid in the currently loaded environment
         if (!config.validate(process.env[key])) {
-            console.warn(`⚠️  ${config.message}`);
+            console.warn(`${config.message}`);
             const newValue = config.generate();
-            
-            // Prepare to append the new variable to the .env file
             contentToAppend += `${key}=${newValue}\n`;
-            
-            // IMPORTANT: Immediately set it in the current process's environment
-            // so the app can use it without a restart.
             process.env[key] = newValue;
         }
     }
-    // If any variables were generated, append them to the .env file
     if (contentToAppend) {
         try {
             fs.appendFileSync(envPath, '\n' + contentToAppend);
-            console.log('✅ Successfully updated .env file with missing variables.');
+            console.log('Successfully updated .env file with missing variables.');
         } catch (error) {
-            console.error('❌ Failed to write to .env file:', error);
+            console.error('Failed to write to .env file:', error);
         }
     }
 }
@@ -146,8 +136,6 @@ const db = new sqlite3.Database(dbPath, (err) => {
 
 function initializeDatabase() {
     db.serialize(() => {
-        // Fix Create tables if they don't exist first
-        // Users table
         db.run(`CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
@@ -157,7 +145,7 @@ function initializeDatabase() {
             signing_public_key TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
-        //Digital Signature
+
         db.run(`CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             sender_id TEXT NOT NULL,
@@ -188,7 +176,6 @@ function initializeDatabase() {
             FOREIGN KEY (user_id) REFERENCES users (id)
         )`);
 
-        // Attempt to add new columns, ignoring errors if they already exist
         const alterTableQueries = [
             'ALTER TABLE users ADD COLUMN refresh_token TEXT',
             'ALTER TABLE users ADD COLUMN signing_public_key TEXT',
@@ -207,9 +194,6 @@ function initializeDatabase() {
     });
 }
 
-/**
- * Middleware to verify JWT token
- */
 const verifyToken = (req, res, next) => {
     const token = req.header('x-auth-token');
     if (!token) {
@@ -225,18 +209,13 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-/**
- * User registration endpoint
- */
 app.post('/api/register', async (req, res) => {
     try {
-        // 1. Accept publicKey from the request body
         const { username, password, publicKey } = req.body;
 
         if (!username || !password) {
             return res.status(400).json({ error: 'Username and password are required' });
         }
-        // We now expect a public key on registration
         if (!publicKey) {
             return res.status(400).json({ error: 'Public key is required for registration' });
         }
@@ -248,12 +227,10 @@ app.post('/api/register', async (req, res) => {
             const passwordHash = await bcrypt.hash(password, 10);
             const userId = uuidv4();
 
-            // 2. Insert the user WITH the public key in one atomic operation
             db.run('INSERT INTO users (id, username, password_hash, public_key) VALUES (?, ?, ?, ?)', 
                 [userId, username, passwordHash, publicKey], function(err) {
                 if (err) return res.status(500).json({ error: 'Failed to create user' });
 
-                // 3. Generate BOTH an access token and a refresh token
                 const accessToken = jwt.sign(
                     { id: userId, username },
                     JWT_SECRET,
@@ -265,11 +242,9 @@ app.post('/api/register', async (req, res) => {
                     { expiresIn: process.env.REFRESH_TOKEN_EXPIRATION || '7d' }
                 );
 
-                // 4. Store the refresh token in the database
                 db.run('UPDATE users SET refresh_token = ? WHERE id = ?', [refreshToken, userId], (err) => {
                     if (err) return res.status(500).json({ error: 'Failed to store refresh token' });
 
-                    // 5. Send both tokens and the user object back to the client
                     res.json({
                         accessToken,
                         refreshToken,
@@ -283,9 +258,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-/**
- * User login endpoint
- */
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -301,7 +273,6 @@ app.post('/api/login', async (req, res) => {
             const isPasswordValid = await bcrypt.compare(password, user.password_hash);
             if (!isPasswordValid) return res.status(400).json({ error: 'Invalid credentials' });
 
-            // Generate Tokens
             const accessToken = jwt.sign(
                 { id: user.id, username: user.username },
                 JWT_SECRET,
@@ -313,7 +284,6 @@ app.post('/api/login', async (req, res) => {
                 { expiresIn: process.env.REFRESH_TOKEN_EXPIRATION || '7d' }
             );
 
-            // Store refresh token in the database
             db.run('UPDATE users SET refresh_token = ? WHERE id = ?', [refreshToken, user.id], (err) => {
                 if (err) return res.status(500).json({ error: 'Failed to store refresh token' });
 
@@ -332,6 +302,7 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ error: 'Server error' });
     }
 });
+
 app.post('/api/token', (req, res) => {
     const { token } = req.body;
 
@@ -366,9 +337,7 @@ app.post('/api/logout', verifyToken, (req, res) => {
         res.status(200).json({ success: true, message: 'Logged out successfully' });
     });
 });
-/**
- * Get user's public key endpoint
- */
+
 app.get('/api/users/:username/publickey', verifyToken, (req, res) => {
     const { username } = req.params;
 
@@ -384,9 +353,6 @@ app.get('/api/users/:username/publickey', verifyToken, (req, res) => {
     });
 });
 
-/**
- * Get all users (for contact list)
- */
 app.get('/api/users', verifyToken, (req, res) => {
     db.all('SELECT id, username FROM users WHERE id != ?', [req.user.id], (err, users) => {
         if (err) {
@@ -411,15 +377,14 @@ app.get('/api/debug/messages', verifyToken, (req, res) => {
             res.status(500).json({ error: err.message });
         } else {
             const messagesWithStructure = rows.map(row => {
-                // Don't try to parse yet - just show raw content
                 return {
                     id: row.id,
                     sender_id: row.sender_id,
                     receiver_id: row.receiver_id,
                     content_length: row.content_length,
                     timestamp: row.timestamp,
-                    rawContent: row.encrypted_content,  // Show the full raw content
-                    contentPreview: row.encrypted_content.substring(0, 200) + '...', // First 200 chars
+                    rawContent: row.encrypted_content,  
+                    contentPreview: row.encrypted_content.substring(0, 200) + '...', 
                     startsWithBrace: row.encrypted_content.trim().startsWith('{'),
                     endsWithBrace: row.encrypted_content.trim().endsWith('}')
                 };
@@ -428,10 +393,7 @@ app.get('/api/debug/messages', verifyToken, (req, res) => {
         }
     });
 });
-/**
- * Update user's public key
- */
-// Update user's public key
+
 app.put('/api/user/publickey', verifyToken, (req, res) => {
     const { publicKey } = req.body;
     const userId = req.user.id;
@@ -454,9 +416,6 @@ app.put('/api/user/publickey', verifyToken, (req, res) => {
     });
 });
 
-/**
- * Get message history between current user and another user
- */
 app.get('/api/messages/:userId', verifyToken, (req, res) => {
     const { userId } = req.params;
     const currentUserId = req.user.id;
@@ -478,9 +437,6 @@ app.get('/api/messages/:userId', verifyToken, (req, res) => {
 
 const connectedUsers = new Map();
 
-/**
- * Digital Signature: signing public key routes
- */
 
 app.put('/api/user/signingkey', verifyToken, (req, res) => {
     const { signingPublicKey } = req.body;

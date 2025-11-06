@@ -1,7 +1,3 @@
-/**
- * E2E Encrypted Messaging Application
- * Main application class handling UI, authentication, and messaging
- */
 class MessagingApp {
     constructor() {
         this.socket = null;
@@ -20,14 +16,6 @@ class MessagingApp {
     }
 
     async init() {
-        // setTimeout(() => {
-        //     const loadingOverlay = document.getElementById('loadingOverlay');
-        //     if (loadingOverlay && window.getComputedStyle(loadingOverlay).display !== 'none') {
-        //         loadingOverlay.style.display = 'none';
-        //         this.showAuthModal();
-        //     }
-        // }, 5000);
-        
         try {
             await this.setupEventListeners();
             await this.checkAuthToken();
@@ -37,9 +25,6 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Check for existing authentication token and initialize app
-     */
     async checkAuthToken() {
         const accessToken = localStorage.getItem('accessToken');
         const refreshToken = localStorage.getItem('refreshToken');
@@ -48,12 +33,9 @@ class MessagingApp {
         if (refreshToken && user) {
             try {
                 this.currentUser = JSON.parse(user);
-
-                // If there's no access token, try to get a new one with the refresh token
                 if (!accessToken) {
                     const newAccessToken = await window.api.refreshToken();
                     if (!newAccessToken) {
-                        // If refresh fails, clear auth data and show login
                         this.clearAuthData();
                         this.showAuthModal();
                         return;
@@ -64,9 +46,9 @@ class MessagingApp {
                 try {
                     const { privateKey: signPriv } = await getOrCreateSigningKeyPair(this.currentUser.id);
                     this.signPrivateKey = signPriv;
-                    console.log('✅ Signing key loaded into application state.');
+                    console.log('Signing key loaded into application state.');
                 } catch (err) {
-                    console.error('⚠️ Failed to load signing key on session resume:', err);
+                    console.error('Failed to load signing key on session resume:', err);
                     alert('Error loading your signing key. Please log in again.');
                     this.logout();
                     return;
@@ -82,24 +64,14 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Clear stored authentication data (but preserve encryption keys)
-     */
     clearAuthData() {
-        // Clear authentication data only - KEEP encryption keys
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
         localStorage.removeItem('user');
-        
-        // Reset crypto instance but don't clear keys from localStorage
         this.crypto = new E2ECrypto();
     }
 
-    /**
-     * Emergency cleanup - clears ALL crypto data (for debugging)
-     */
     emergencyCleanup() {
-        // Clear all localStorage
         const keys = Object.keys(localStorage);
         keys.forEach(key => {
             if (key.startsWith('privateKey_') || key.startsWith('publicKey_')) {
@@ -107,29 +79,19 @@ class MessagingApp {
             }
         });
         
-        // Clear auth data
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         
-        // Reset crypto
         this.crypto = new E2ECrypto();
-        
-        // Reload page
         window.location.reload();
     }
 
-    /**
-     * Show authentication modal
-     */
     showAuthModal() {
         document.getElementById('loadingOverlay').style.display = 'none';
         document.getElementById('authModal').style.display = 'flex';
         document.getElementById('app').style.display = 'none';
     }
 
-    /**
-     * Hide authentication modal and show main app
-     */
     hideAuthModal() {
         document.getElementById('loadingOverlay').style.display = 'none';
         document.getElementById('authModal').style.display = 'none';
@@ -180,9 +142,6 @@ class MessagingApp {
         document.getElementById('authError').textContent = '';
     }
 
-    /**
-     * Handle user authentication (login/register)
-     */
     async handleAuth(e) {
         e.preventDefault();
         
@@ -204,13 +163,9 @@ class MessagingApp {
         try {
             let response;
             let requestBody = { username, password };
-            
-            // --- THE FIX: Part 1 ---
-            // We declare this here so it can be used both before and after the fetch call.
             let cryptoForRegistration = null; 
     
             if (isLogin) {
-                // --- LOGIN LOGIC (unchanged) ---
                 if (loadingText) loadingText.textContent = 'Logging in...';
                 response = await fetch('/api/login', {
                     method: 'POST',
@@ -219,15 +174,12 @@ class MessagingApp {
                 });
     
             } else {
-                // --- NEW REGISTRATION LOGIC ---
                 if (loadingText) loadingText.textContent = 'Generating encryption keys...';
                 
-                // 1. Generate keys and store the instance in our variable.
                 cryptoForRegistration = new E2ECrypto();
                 await cryptoForRegistration.generateKeyPair(); 
                 const publicKey = await cryptoForRegistration.exportPublicKey();
     
-                // 2. Add the public key to the request body
                 requestBody.publicKey = publicKey;
     
                 if (loadingText) loadingText.textContent = 'Creating account...';
@@ -257,24 +209,22 @@ class MessagingApp {
                         method: 'PUT',
                         headers: {
                         'Content-Type': 'application/json',
-                        'x-auth-token': data.accessToken   // localStorage.getItem('accessToken')
+                        'x-auth-token': data.accessToken   
                         },
                         body: JSON.stringify({ signingPublicKey: signPubB64 })
                     });
 
                     if (!res.ok) {
-                        console.warn('⚠️ Failed to upload signing key:', await res.text());
+                        console.warn('Failed to upload signing key:', await res.text());
                     } else {
-                        console.log('✅ Signing key uploaded');
+                        console.log('Signing key uploaded');
                     }
                 } catch (err) {
-                    console.error('⚠️ Error generating/uploading signing key:', err);
+                    console.error('Error generating/uploading signing key:', err);
                 }
-                // --- THE FIX: Part 2 ---
-                // For registration, we now save the keys from the *same instance* we used before.
+
                 if (!isLogin && cryptoForRegistration) {
                     if (loadingText) loadingText.textContent = 'Securing your keys...';
-                    // This saves the correct key pair (KeyPair A) to localStorage.
                     await cryptoForRegistration.saveKeyPair(data.user.id);
                 }
     
@@ -294,7 +244,6 @@ class MessagingApp {
 
     async updateUserPublicKey(publicKey) {
         try {
-            // Use the new API client
             const response = await window.api.request('/api/user/publickey', {
                 method: 'PUT',
                 body: JSON.stringify({ publicKey })
@@ -376,7 +325,6 @@ class MessagingApp {
 
     async loadContacts() {
         try {
-            // Use the new API client
             const response = await window.api.request('/api/users');
     
             if (response.ok) {
@@ -459,37 +407,24 @@ class MessagingApp {
         await this.loadMessageHistory(contact.id);
     }
 
-    /**
-     * Load and decrypt message history for a contact
-     */
     async loadMessageHistory(contactId) {
         try {
-            const token = localStorage.getItem('accessToken'); // Use accessToken
+            const token = localStorage.getItem('accessToken'); 
             const response = await window.api.request(`/api/messages/${contactId}`);
     
             if (!response.ok) {
                 throw new Error('Failed to load messages');
             }
     
-            const messages = await response.json(); // These are the confirmed messages from the server
+            const messages = await response.json(); 
             const decryptedMessages = [];
-    
-            // --- THE FIX STARTS HERE ---
-    
-            // 1. Get the IDs of all messages the server knows about.
             const serverMessageIds = new Set(messages.map(msg => msg.id));
     
-            // 2. Get the current list of messages from memory, which might contain unsaved local messages.
             const existingMessages = this.messages.get(contactId) || [];
-            
-            // 3. Filter the existing messages to find ONLY the local ones that the server DOES NOT know about yet.
-            // This prevents the duplication.
+        
             const uniqueLocalMessages = existingMessages.filter(msg => {
                 return msg.isLocal && !serverMessageIds.has(msg.id);
             });
-    
-            // --- THE FIX ENDS HERE ---
-            
             for (const message of messages) {
                 const isSentByMe = message.sender_id === this.currentUser.id;
                 const isForMe = message.receiver_id === this.currentUser.id; 
@@ -527,7 +462,6 @@ class MessagingApp {
                 }
             }
     
-            // Combine the processed server messages with any truly unique local messages
             const allMessages = [...decryptedMessages, ...uniqueLocalMessages];
             allMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
@@ -538,9 +472,6 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Render all messages for the selected contact
-     */
     renderMessages() {
         const messagesContainer = document.getElementById('messagesContainer');
         messagesContainer.innerHTML = '';
@@ -582,9 +513,7 @@ class MessagingApp {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
 
-    /**
-     * Send an encrypted message to the selected contact
-     */
+
     async sendMessage() {
         const messageInput = document.getElementById('messageInput');
         const content = messageInput.value.trim();
@@ -594,8 +523,6 @@ class MessagingApp {
         }
     
         try {
-            // CHANGED: Replaced fetch with window.api.request.
-            // The API client automatically handles the authentication token.
             const response = await window.api.request(`/api/users/${this.selectedContact.username}/publickey`);
     
             if (!response.ok) {
@@ -607,7 +534,6 @@ class MessagingApp {
                 throw new Error('Recipient does not have a public key available.');
             }
             
-            // Prepare and sign the message ===
             const timestamp = new Date().toISOString();
             const payloadToSign = JSON.stringify({
                 senderId: this.currentUser.id,
@@ -618,11 +544,9 @@ class MessagingApp {
 
             const signature = await signMessage(this.signPrivateKey, payloadToSign);
             
-            // Encrypt the message content
             const encryptedContent = await this.crypto.encryptMessage(content, publicKey);
             const messageId = this.crypto.generateMessageId();
             
-            // Send the encrypted message via socket
             this.socket.emit('private_message', {
                 receiverId: this.selectedContact.id,
                 encryptedContent: encryptedContent,
@@ -631,7 +555,6 @@ class MessagingApp {
                 signingTimestamp: timestamp
             });
     
-            // Store message locally until server confirmation
             const messages = this.messages.get(this.selectedContact.id) || [];
             messages.push({
                 id: messageId,
@@ -653,20 +576,16 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Handle incoming encrypted messages from other users
-     */
-
     async handleNewMessage(data) {
         try {
-            console.log("👉 Step 1: handleNewMessage START", data);
+            console.log("Step 1: handleNewMessage START", data);
             
-            console.log("👉 Step 2: check receiverId");
+            console.log("Step 2: check receiverId");
             if (data.receiverId !== this.currentUser.id) {
                 console.warn('⚠️ Message not intended for this user');
             }
             
-            console.log("👉 Step 3: start decrypt");
+            console.log("Step 3: start decrypt");
             let decryptedContent;
             try {
                 decryptedContent = await this.crypto.decryptMessage(data.encryptedContent); 
@@ -674,9 +593,9 @@ class MessagingApp {
                 console.error('Failed to decrypt incoming message:', error);
                 return;
             }
-            console.log("✅ Step 3: decryptedContent =", decryptedContent);
+            console.log("Step 3: decryptedContent =", decryptedContent);
 
-            console.log("👉 Step 4: build payloadToVerify");
+            console.log("Step 4: build payloadToVerify");
             const payloadToVerify = JSON.stringify({
                 senderId: data.senderId,
                 receiverId: data.receiverId,
@@ -684,12 +603,12 @@ class MessagingApp {
                 timestamp: data.signingTimestamp,
             });
 
-            console.log("👉 Step 5: fetch or get signingPublicKey");
+            console.log("Step 5: fetch or get signingPublicKey");
             if (!this.signingKeys) this.signingKeys = new Map();
             let signingPublicKey = this.signingKeys.get(data.senderId);
 
             if (!signingPublicKey) {
-                console.log("👉 Step 5a: fetch from API");
+                console.log("Step 5a: fetch from API");
                 const response = await window.api.request(
                     `/api/user/${encodeURIComponent(data.senderUsername)}/signingkey`
                 );
@@ -698,21 +617,20 @@ class MessagingApp {
                     signingPublicKey = await importSpkiRsaPss(result.signingPublicKey);
                     this.signingKeys.set(data.senderId, signingPublicKey);
                 } else {
-                    console.warn('⚠️ Could not fetch signing key for user:', data.senderUsername);
+                    console.warn('Could not fetch signing key for user:', data.senderUsername);
                     return; 
                 }
             }
 
-            console.log("👉 Step 6: verify signature");
+            console.log("Step 6: verify signature");
             const isValid = await verifyMessage(signingPublicKey, payloadToVerify, data.signature);
-            console.log("✅ Step 6: isValid =", isValid);
+            console.log("Step 6: isValid =", isValid);
             if (!isValid) {
-                console.warn("⚠️ Message signature invalid!");
+                console.warn("Message signature invalid!");
                 return;
             }
 
-            console.log("👉 Step 7: store and render");
-            // Store the verified message
+            console.log("Step 7: store and render");
             const messages = this.messages.get(data.senderId) || [];
             messages.push({
                 id: data.id,
@@ -725,7 +643,6 @@ class MessagingApp {
             });
             this.messages.set(data.senderId, messages);
 
-            // Update UI if this message is from the currently selected contact
             if (this.selectedContact && this.selectedContact.id === data.senderId) {
                 this.renderMessages();
             }
@@ -735,9 +652,6 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Handle typing indicators - notify when user is typing
-     */
     handleTyping() {
         if (this.selectedContact && this.typingTimeout) {
             clearTimeout(this.typingTimeout);
@@ -752,9 +666,6 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Update the typing indicator display
-     */
     updateTypingIndicator() {
         const typingIndicator = document.getElementById('typingIndicator');
         
@@ -765,30 +676,22 @@ class MessagingApp {
         }
     }
 
-    /**
-     * Log out the user and clean up session data (but preserve encryption keys)
-     */
     async logout() {
-        // Clear authentication data only - KEEP encryption keys
         try {
-            // Call the server to invalidate the refresh token
             await window.api.request('/api/logout', { method: 'POST' });
         } catch (error) {
             console.error("Logout API call failed, proceeding with client-side cleanup.", error);
         }
     
-        // Clear local storage
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
         localStorage.removeItem('user');
         
-        // Disconnect socket
         if (this.socket) {
             this.socket.disconnect();
             this.socket = null;
         }
 
-        // Reset application state
         this.currentUser = null;
         this.selectedContact = null;
         this.contacts = [];
